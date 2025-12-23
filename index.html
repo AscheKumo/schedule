@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Am I Working?</title>
+  <style>
+    :root {
+      --bg: #000;
+      --fg: #ddd;
+      --red: #ff3b3b;
+      --green: #37d67a;
+      --blue: #4aa3ff;
+      --muted: #9aa0a6;
+    }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { height: 100%; display: grid; place-items: center; text-align: center; padding: 24px; }
+    #status { font-size: clamp(44px, 8vw, 110px); font-weight: 800; letter-spacing: 0.5px; margin: 0; }
+    #sub { margin-top: 14px; font-size: clamp(18px, 2.2vw, 28px); color: var(--muted); }
+    #extra { margin-top: 14px; font-size: clamp(16px, 2vw, 22px); color: var(--muted); }
+    .row { margin-top: 10px; font-size: clamp(16px, 2vw, 22px); color: var(--muted); }
+    .pill { display: inline-block; padding: 6px 10px; border: 1px solid #2a2a2a; border-radius: 999px; color: var(--muted); font-size: 14px; margin-top: 18px; }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div>
+      <h1 id="status">...</h1>
+      <div id="sub">...</div>
+      <div id="extra"></div>
+      <div class="pill" id="meta"></div>
+    </div>
+  </div>
+
+<script>
+/**
+ * =========================
+ * CONFIG (EDIT THIS SECTION)
+ * =========================
+ */
+const CONFIG = {
+  // Wyoming time zone
+  timeZone: "America/Denver",
+
+  // Normal work hours (24h)
+  workStart: { h: 8,  m: 0 },   // 8:00 AM
+  workEnd:   { h: 17, m: 0 },   // 5:00 PM
+
+  // Sleeping rule: if local time is >= this hour, show "Sleeping"
+  sleepAfterHour: 23, // 11 PM
+
+  // Holiday rules (for your listed holidays)
+  holidays: {
+    // Fixed-date holidays (month is 1-12)
+    fixed: [
+      { name: "New Year's Day", month: 1,  day: 1  },
+      { name: "Independence Day", month: 7, day: 4  },
+      { name: "Christmas Day", month: 12, day: 25 },
+    ],
+
+    // Floating holidays (US-style)
+    // - Memorial Day: last Monday in May
+    // - Labor Day: first Monday in September
+    // - Thanksgiving: fourth Thursday in November
+    floating: [
+      { name: "Memorial Day", month: 5,  weekday: 1, occurrence: "last"  },  // Monday=1
+      { name: "Labor Day",    month: 9,  weekday: 1, occurrence: 1       },
+      { name: "Thanksgiving", month: 11, weekday: 4, occurrence: 4       },  // Thursday=4
+      { name: "Day After Thanksgiving", month: 11, relativeTo: "Thanksgiving", offsetDays: 1 },
+    ],
+
+    // Special case: Christmas Eve half-day (work ends at noon)
+    christmasEveHalfDay: true,
+    christmasEveEnd: { h: 12, m: 0 }, // 12:00 PM
+  },
+
+  /**
+   * TIME OFF (leave empty until you need it)
+   * Add entries like:
+   * { start: "2026-01-15", end: "2026-01-20", label: "Vacation" }
+   *
+   * Rules:
+   * - start/end are inclusive dates in YYYY-MM-DD (local Wyoming dates)
+   * - If today is within one of these ranges, site shows "Time Off" and counts down to return-to-work time.
+   */
+  timeOff: [
+    // { start: "2026-01-15", end: "2026-01-20", label: "Vacation" },
+  ],
+};
+
+/**
+ * =========================
+ * IMPLEMENTATION
+ * =========================
+ */
+
+const $status = document.getElementById("status");
+const $sub = document.getElementById("sub");
+const $extra = document.getElementById("extra");
+const $meta = document.getElementById("meta");
+
+// Get parts in the configured timezone using Intl
+function tzParts(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+    weekday: "short",
+  });
+  const parts = dtf.formatToParts(date);
+  const get = (type) => parts.find(p => p.type === type)?.value;
+  return {
+    year: +get("year"),
+    month: +get("month"),
+    day: +get("day"),
+    hour: +get("hour"),
+    minute: +get("minute"),
+    second: +get("second"),
+    weekday: get("weekday"), // e.g. "Mon"
+  };
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function ymd({year, month, day}) {
+  return `${year}-${pad(month)}-${pad(day)}`;
+}
+
+function cmpYMD(a, b) { // a,b as "YYYY-MM-DD"
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// Build a Date that corresponds to a local time in the target timezone.
+// Trick: we can’t directly construct TZ date without a library, so we search by matching formatted parts.
+// This is robust enough for minute-level scheduling.
+function dateFromTZLocal({year, month, day, hour, minute, second=0}, timeZone) {
+  // Start with an approximate UTC date and adjust.
+  const guess = new Date(Date.UTC(year, month-1, day, hour, minute, second));
+  // We'll adjust by up to +/- 24h until the formatted parts match.
+  const target = {year, month, day, hour, minute, second};
+  for (let step = -24; step <= 24; step++) {
+    const d = new Date(guess.getTime() + step * 60 * 60 * 1000);
+    const p = tzParts(d, timeZone);
+    if (p.year===target.year && p.month===target.month && p.day===target.day &&
+        p.hour===target.hour && p.minute===target.minute) {
+      return d;
+    }
+  }
+  // Fallback: return guess if not found (should be rare)
+  return guess;
+}
+
+function isWeekend(weekdayShort) {
+  return weekdayShort === "Sat" || weekdayShort === "Sun";
+}
+
+// weekday mapping for floating holidays (Mon=1..Sun=0 in our config style)
+const WEEKDAY_TO_NUM = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function daysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate(); // month is 1-12
+}
+
+function computeFloatingHolidayYMD(year, rule, timeZone) {
+  // rule: {name, month, weekday, occurrence} where weekday: 0..6 with Sunday=0, occurrence: n or "last"
+  const month = rule.month;
+  const targetWeekday = rule.weekday; // 0..6
+  const dim = daysInMonth(year, month);
+
+  if (rule.occurrence === "last") {
+    // start from last day of month and go backwards
+    for (let d = dim; d >= dim - 6; d--) {
+      const dt = dateFromTZLocal({year, month, day: d, hour: 12, minute: 0}, timeZone);
+      const w = WEEKDAY_TO_NUM[tzParts(dt, timeZone).weekday];
+      if (w === targetWeekday) return `${year}-${pad(month)}-${pad(d)}`;
+    }
+  } else {
+    // nth weekday of month
+    let count = 0;
+    for (let d = 1; d <= dim; d++) {
+      const dt = dateFromTZLocal({year, month, day: d, hour: 12, minute: 0}, timeZone);
+      const w = WEEKDAY_TO_NUM[tzParts(dt, timeZone).weekday];
+      if (w === targetWeekday) {
+        count++;
+        if (count === rule.occurrence) return `${year}-${pad(month)}-${pad(d)}`;
+      }
+    }
+  }
+  return null;
+}
+
+function holidayMapForYear(year) {
+  const map = new Map(); // ymd -> name
+  // fixed
+  for (const h of CONFIG.holidays.fixed) {
+    map.set(`${year}-${pad(h.month)}-${pad(h.day)}`, h.name);
+  }
+  // floating base holidays
+  const floatingComputed = new Map(); // name -> ymd
+  for (const r of CONFIG.holidays.floating) {
+    if (r.relativeTo) continue;
+    const d = computeFloatingHolidayYMD(year, r, CONFIG.timeZone);
+    if (d) {
+      map.set(d, r.name);
+      floatingComputed.set(r.name, d);
+    }
+  }
+  // relative holidays (day after thanksgiving)
+  for (const r of CONFIG.holidays.floating) {
+    if (!r.relativeTo) continue;
+    const base = floatingComputed.get(r.relativeTo);
+    if (!base) continue;
+    const [Y,M,D] = base.split("-").map(Number);
+    const baseDate = dateFromTZLocal({year: Y, month: M, day: D, hour: 12, minute: 0}, CONFIG.timeZone);
+    const rel = new Date(baseDate.getTime() + r.offsetDays * 24 * 60 * 60 * 1000);
+    const p = tzParts(rel, CONFIG.timeZone);
+    const relYMD = ymd(p);
+    map.set(relYMD, r.name);
+  }
+  return map;
+}
+
+function findActiveTimeOff(todayYMD) {
+  for (const entry of CONFIG.timeOff) {
+    if (!entry?.start || !entry?.end) continue;
+    if (cmpYMD(todayYMD, entry.start) >= 0 && cmpYMD(todayYMD, entry.end) <= 0) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function formatCountdown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const s = total % 60;
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600) % 24;
+  const d = Math.floor(total / 86400);
+  const parts = [];
+  if (d) parts.push(`${d}d`);
+  parts.push(`${h}h`, `${m}m`, `${s}s`);
+  return parts.join(" ");
+}
+
+function setStatus(text, colorVar) {
+  $status.textContent = text;
+  $status.style.color = `var(${colorVar})`;
+}
+
+function nextWorkStartAfter(now) {
+  // Find next date/time that is a valid work start (not weekend/holiday/time off).
+  // We'll scan day-by-day for up to ~2 years (plenty).
+  const nowParts = tzParts(now, CONFIG.timeZone);
+  let year = nowParts.year, month = nowParts.month, day = nowParts.day;
+
+  for (let i = 0; i < 800; i++) {
+    const probe = dateFromTZLocal({year, month, day, hour: 12, minute: 0}, CONFIG.timeZone);
+    const p = tzParts(probe, CONFIG.timeZone);
+    const probeYMD = ymd(p);
+
+    const holidays = holidayMapForYear(p.year);
+    const isHol = holidays.has(probeYMD);
+    const wknd = isWeekend(p.weekday);
+    const timeOff = findActiveTimeOff(probeYMD);
+
+    if (!wknd && !isHol && !timeOff) {
+      const start = dateFromTZLocal({
+        year: p.year, month: p.month, day: p.day,
+        hour: CONFIG.workStart.h, minute: CONFIG.workStart.m
+      }, CONFIG.timeZone);
+
+      if (start.getTime() > now.getTime()) return start;
+    }
+
+    // increment day
+    const next = new Date(probe.getTime() + 24*60*60*1000);
+    const np = tzParts(next, CONFIG.timeZone);
+    year = np.year; month = np.month; day = np.day;
+  }
+  return null;
+}
+
+function workEndForDateParts(dateParts) {
+  // Normal end is CONFIG.workEnd, except Christmas Eve half-day.
+  const end = { ...CONFIG.workEnd };
+  if (CONFIG.holidays.christmasEveHalfDay) {
+    const ymdStr = ymd(dateParts);
+    if (ymdStr.endsWith("-12-24")) {
+      end.h = CONFIG.holidays.christmasEveEnd.h;
+      end.m = CONFIG.holidays.christmasEveEnd.m;
+    }
+  }
+  return end;
+}
+
+function render() {
+  const now = new Date();
+  const p = tzParts(now, CONFIG.timeZone);
+  const todayYMD = ymd(p);
+
+  const holidays = holidayMapForYear(p.year);
+  const holidayName = holidays.get(todayYMD) || "";
+  const wknd = isWeekend(p.weekday);
+  const timeOff = findActiveTimeOff(todayYMD);
+
+  // Build today's work start/end instants
+  const startToday = dateFromTZLocal({year: p.year, month: p.month, day: p.day, hour: CONFIG.workStart.h, minute: CONFIG.workStart.m}, CONFIG.timeZone);
+  const endCfg = workEndForDateParts(p);
+  const endToday = dateFromTZLocal({year: p.year, month: p.month, day: p.day, hour: endCfg.h, minute: endCfg.m}, CONFIG.timeZone);
+
+  const afterSleep = p.hour >= CONFIG.sleepAfterHour;
+
+  // Default: determine next work start
+  const nextStart = nextWorkStartAfter(now);
+
+  // Meta line
+  $meta.textContent = `${todayYMD} ${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)} (${CONFIG.timeZone})`;
+
+  // If user is on time off today, show that first
+  if (timeOff) {
+    setStatus("Time Off", "--green");
+    const label = timeOff.label ? ` — ${timeOff.label}` : "";
+    $extra.textContent = `Time off active${label} (${timeOff.start} to ${timeOff.end})`;
+
+    if (nextStart) {
+      $sub.textContent = `Back to work in ${formatCountdown(nextStart - now)}`;
+    } else {
+      $sub.textContent = `Back to work: unknown`;
+    }
+    return;
+  }
+
+  // If holiday today (full day off) treat as Not Working (unless weekend already)
+  // (Christmas Eve half-day is NOT a holiday here; it’s handled by early end time.)
+  if (!wknd && holidayName) {
+    setStatus("Not Working", "--green");
+    $extra.textContent = `Holiday: ${holidayName}`;
+    $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
+    return;
+  }
+
+  // Weekend
+  if (wknd) {
+    setStatus("Weekend", "--green");
+    $extra.textContent = "";
+    $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
+    return;
+  }
+
+  // Sleeping rule (after 11pm)
+  if (afterSleep) {
+    setStatus("Sleeping", "--blue");
+    $extra.textContent = "";
+    $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
+    return;
+  }
+
+  // Workday: decide if currently working
+  if (now >= startToday && now < endToday) {
+    setStatus("Working", "--red");
+    $extra.textContent = (todayYMD.endsWith("-12-24")) ? "Christmas Eve (half day)" : "";
+    $sub.textContent = `Off work in ${formatCountdown(endToday - now)}`;
+    return;
+  }
+
+  // Otherwise not working (before work or after work)
+  setStatus("Not Working", "--green");
+  $extra.textContent = (todayYMD.endsWith("-12-24") && now >= endToday) ? "Christmas Eve (half day)" : "";
+  $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
+}
+
+render();
+setInterval(render, 250); // smooth countdown
+</script>
+</body>
+</html>
