@@ -18,6 +18,7 @@
     #status { font-size: clamp(44px, 8vw, 110px); font-weight: 800; letter-spacing: 0.5px; margin: 0; }
     #sub { margin-top: 14px; font-size: clamp(18px, 2.2vw, 28px); color: var(--muted); }
     #extra { margin-top: 14px; font-size: clamp(16px, 2vw, 22px); color: var(--muted); }
+    #quote { margin-top: 24px; font-size: clamp(14px, 1.8vw, 18px); color: var(--blue); font-style: italic; max-width: 90%; }
   </style>
 </head>
 <body>
@@ -26,6 +27,7 @@
       <h1 id="status">...</h1>
       <div id="sub">...</div>
       <div id="extra"></div>
+      <div id="quote"></div>
     </div>
   </div>
 
@@ -36,12 +38,15 @@
  * =========================
  */
 const CONFIG = {
-  timeZone: "America/Denver",
+  timeZone: "America/Detroit",
 
-  workStart: { h: 8,  m: 0 },
-  workEnd:   { h: 17, m: 0 },
+  workStart: { h: 10,  m: 0 },
+  workEnd:   { h: 21, m: 0 },
 
   sleepAfterHour: 23,
+
+  // Work days: Sun (0), Mon (1), Tue (2), Wed (3)
+  workDays: [0, 1, 2, 3],
 
   holidays: {
     fixed: [
@@ -56,17 +61,60 @@ const CONFIG = {
       { name: "Day After Thanksgiving", month: 11, relativeTo: "Thanksgiving", offsetDays: 1 },
     ],
     christmasEveHalfDay: true,
-    christmasEveEnd: { h: 17, m: 0 },
+    christmasEveEnd: { h: 21, m: 0 },
   },
 
   timeOff: [
     // { start: "2026-01-15", end: "2026-01-20", label: "Vacation" },
+  ],
+
+  quotes: [
+    "Don't quit your day job... oh wait, you can't.",
+    "Living my best life, one shift at a time.",
+    "I'm not saying I'm Batman, but have you ever seen me and Batman together?",
+    "Hustle hard so you can nap harder.",
+    "Wake up with determination, go to bed with satisfaction.",
+    "The only way to do great work is to love what you do... faking it works too.",
+    "Fortune favors the bold, but bills favor the employed.",
+    "I'm not lazy, I'm just on energy-saving mode.",
+    "Success is not final, failure is not fatal: it's the courage to continue that counts.",
+    "Your limitation—it's only your imagination.",
+    "Work hard in silence, let your paycheck make the noise.",
+    "The early bird gets the worm, but the second mouse gets the cheese.",
+    "Don't watch the clock; do what it does. Keep going.",
+    "The future depends on what you do today.",
+    "Believe you can and you're halfway there.",
+    "I am my own muse. I am the subject I know best. I am the subject I want to know better.",
+    "Excellence is not a skill, it's an attitude.",
+    "Great things never come from comfort zones.",
+    "Dream it. Wish it. Do it.",
+    "Success doesn't just find you. You have to go out and get it.",
+    "Greatness is not giftedness but a choice.",
+    "Push yourself, because no one else is going to do it for you.",
+    "Coffee: because murder is illegal.",
+    "I'm not arguing, I'm just explaining why I'm right.",
+    "At least you're consistent in your mediocrity.",
+    "You miss 100% of the shots you don't take.",
+    "The only impossible journey is the one you never begin.",
+    "Effort only fully releases its reward after a person refuses to quit.",
+    "Who else is going to do it? Not me, probably.",
+    "Just do it, I guess.",
+    "You're doing great, sweetie.",
+    "Tell me and I forget, teach me and I may remember, involve me and I learn.",
+    "Sometimes we're tested not to show our weaknesses, but to discover our strengths.",
+    "The man who says he can, and the man who says he can't, are both usually right.",
+    "Money can't buy happiness, but it can buy coffee.",
+    "Passion is the difference between having a job and having a career.",
+    "Don't be afraid to fail, be afraid not to try.",
+    "The best time to plant a tree was 20 years ago. The second best time is now.",
+    "Your limitation is only your imagination, and also budget constraints.",
   ],
 };
 
 const $status = document.getElementById("status");
 const $sub = document.getElementById("sub");
 const $extra = document.getElementById("extra");
+const $quote = document.getElementById("quote");
 
 // Get parts in the configured timezone using Intl
 function tzParts(date, timeZone) {
@@ -105,6 +153,10 @@ function dateFromTZLocal({year, month, day, hour, minute, second=0}, timeZone) {
     }
   }
   return guess;
+}
+
+function isWorkDay(weekdayNum) { 
+  return CONFIG.workDays.includes(weekdayNum); 
 }
 
 function isWeekend(weekdayShort) { return weekdayShort === "Sat" || weekdayShort === "Sun"; }
@@ -186,6 +238,11 @@ function formatCountdown(ms) {
   return parts.join(" ");
 }
 
+function getQuoteOfDay(ymdStr) {
+  const hash = ymdStr.split("-").reduce((h, s) => h + s.charCodeAt(0), 0);
+  return CONFIG.quotes[hash % CONFIG.quotes.length];
+}
+
 function setStatus(text, colorVar) {
   $status.textContent = text;
   $status.style.color = `var(${colorVar})`;
@@ -199,13 +256,14 @@ function nextWorkStartAfter(now) {
     const probe = dateFromTZLocal({year, month, day, hour: 12, minute: 0}, CONFIG.timeZone);
     const p = tzParts(probe, CONFIG.timeZone);
     const probeYMD = ymd(p);
+    const probeDayNum = WEEKDAY_TO_NUM[p.weekday];
 
     const holidays = holidayMapForYear(p.year);
     const isHol = holidays.has(probeYMD);
-    const wknd = isWeekend(p.weekday);
+    const isWorkDayCheck = isWorkDay(probeDayNum);
     const timeOff = findActiveTimeOff(probeYMD);
 
-    if (!wknd && !isHol && !timeOff) {
+    if (isWorkDayCheck && !isHol && !timeOff) {
       const start = dateFromTZLocal({
         year: p.year, month: p.month, day: p.day,
         hour: CONFIG.workStart.h, minute: CONFIG.workStart.m
@@ -237,10 +295,11 @@ function render() {
   const now = new Date();
   const p = tzParts(now, CONFIG.timeZone);
   const todayYMD = ymd(p);
+  const dayNum = WEEKDAY_TO_NUM[p.weekday];
 
   const holidays = holidayMapForYear(p.year);
   const holidayName = holidays.get(todayYMD) || "";
-  const wknd = isWeekend(p.weekday);
+  const isWorkDay = CONFIG.workDays.includes(dayNum);
   const timeOff = findActiveTimeOff(todayYMD);
 
   const startToday = dateFromTZLocal(
@@ -256,6 +315,8 @@ function render() {
   const afterSleep = p.hour >= CONFIG.sleepAfterHour;
   const nextStart = nextWorkStartAfter(now);
 
+  $quote.textContent = `"${getQuoteOfDay(todayYMD)}"`;
+
   if (timeOff) {
     setStatus("Time Off", "--green");
     const label = timeOff.label ? ` — ${timeOff.label}` : "";
@@ -264,15 +325,15 @@ function render() {
     return;
   }
 
-  if (!wknd && holidayName) {
+  if (!isWorkDay && holidayName) {
     setStatus("Not Working", "--green");
     $extra.textContent = `Holiday: ${holidayName}`;
     $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
     return;
   }
 
-  if (wknd) {
-    setStatus("Weekend", "--green");
+  if (!isWorkDay) {
+    setStatus("Off", "--green");
     $extra.textContent = "";
     $sub.textContent = nextStart ? `Back to work in ${formatCountdown(nextStart - now)}` : "Back to work: unknown";
     return;
